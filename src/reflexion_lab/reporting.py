@@ -20,11 +20,64 @@ def failure_breakdown(records: list[RunRecord]) -> dict:
     grouped: dict[str, Counter] = defaultdict(Counter)
     for record in records:
         grouped[record.agent_type][record.failure_mode] += 1
+        grouped["all"][record.failure_mode] += 1
     return {agent: dict(counter) for agent, counter in grouped.items()}
+
+
+def _build_discussion(summary: dict, failure_modes: dict) -> str:
+    react = summary.get("react", {})
+    reflexion = summary.get("reflexion", {})
+    delta = summary.get("delta_reflexion_minus_react", {})
+    react_em = react.get("em", 0)
+    reflexion_em = reflexion.get("em", 0)
+    em_delta = delta.get("em_abs", 0)
+    token_ratio = (
+        reflexion.get("avg_token_estimate", 0) / react.get("avg_token_estimate", 1)
+        if react.get("avg_token_estimate") else 0
+    )
+    latency_ratio = (
+        reflexion.get("avg_latency_ms", 0) / react.get("avg_latency_ms", 1)
+        if react.get("avg_latency_ms") else 0
+    )
+    react_fm = failure_modes.get("react", {})
+    reflexion_fm = failure_modes.get("reflexion", {})
+
+    # Xác định failure mode chính còn sót ở Reflexion (ngoài "none").
+    remaining = {k: v for k, v in reflexion_fm.items() if k != "none"}
+    top_remaining = (
+        max(remaining.items(), key=lambda kv: kv[1]) if remaining else ("none", 0)
+    )
+
+    return (
+        f"Reflexion đạt EM {reflexion_em:.2f} so với ReAct {react_em:.2f} "
+        f"(delta {em_delta:+.2f}) trên {react.get('count', 0)} câu HotpotQA. "
+        f"Cái giá phải trả: trung bình {reflexion.get('avg_attempts', 0):.2f} "
+        f"attempts/câu (ReAct luôn là 1), tokens tăng {token_ratio:.2f}× và "
+        f"latency tăng {latency_ratio:.2f}×. Phân tích failure_modes cho thấy "
+        f"ReAct phân bổ lỗi như sau: {dict(react_fm)}, trong khi Reflexion còn "
+        f"lại: {dict(reflexion_fm)}. Sau reflection, lỗi phổ biến nhất chưa xử lý "
+        f"được là '{top_remaining[0]}' ({top_remaining[1]} câu) — cho thấy "
+        f"evaluator đôi khi không chỉ ra đúng thiếu sót, hoặc reflector đưa ra "
+        f"chiến thuật quá chung chung nên actor vẫn lặp lại lỗi. Về mặt vận hành, "
+        f"với budget đủ dư, đánh đổi này hợp lý cho câu hỏi multi-hop. Với budget "
+        f"khắt khe, cần adaptive_max_attempts hoặc memory_compression để giảm chi "
+        f"phí. Model sử dụng là qwen2.5:3b-instruct qua Ollama; chất lượng "
+        f"evaluator/reflector giới hạn bởi kích thước model."
+    )
+
 
 def build_report(records: list[RunRecord], dataset_name: str, mode: str = "mock") -> ReportPayload:
     examples = [{"qid": r.qid, "agent_type": r.agent_type, "gold_answer": r.gold_answer, "predicted_answer": r.predicted_answer, "is_correct": r.is_correct, "attempts": r.attempts, "failure_mode": r.failure_mode, "reflection_count": len(r.reflections)} for r in records]
-    return ReportPayload(meta={"dataset": dataset_name, "mode": mode, "num_records": len(records), "agents": sorted({r.agent_type for r in records})}, summary=summarize(records), failure_modes=failure_breakdown(records), examples=examples, extensions=["structured_evaluator", "reflection_memory", "benchmark_report_json", "mock_mode_for_autograding"], discussion="Reflexion helps when the first attempt stops after the first hop or drifts to a wrong second-hop entity. The tradeoff is higher attempts, token cost, and latency. In a real report, students should explain when the reflection memory was useful, which failure modes remained, and whether evaluator quality limited gains.")
+    summary = summarize(records)
+    failure_modes = failure_breakdown(records)
+    return ReportPayload(
+        meta={"dataset": dataset_name, "mode": mode, "num_records": len(records), "agents": sorted({r.agent_type for r in records})},
+        summary=summary,
+        failure_modes=failure_modes,
+        examples=examples,
+        extensions=["structured_evaluator", "reflection_memory", "benchmark_report_json"],
+        discussion=_build_discussion(summary, failure_modes),
+    )
 
 def save_report(report: ReportPayload, out_dir: str | Path) -> tuple[Path, Path]:
     out_dir = Path(out_dir)

@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>Reflexion Agent — Live Pipeline</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    html, body { height: 100%; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    .scroll-y { overflow-y: auto; scrollbar-width: thin; scrollbar-color: #475569 transparent; }
+    .scroll-y::-webkit-scrollbar { width: 8px; }
+    .scroll-y::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+
+    .fade-in { animation: fade .35s ease-out; }
+    @keyframes fade { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+    .pulse-ring { position: relative; }
+    .pulse-ring::after {
+      content: ""; position: absolute; inset: -4px; border-radius: 12px;
+      border: 2px solid rgba(147, 197, 253, .9);
+      animation: pulse 1.3s infinite;
+    }
+    @keyframes pulse {
+      0%   { opacity: 1; transform: scale(1); }
+      100% { opacity: 0; transform: scale(1.05); }
+    }
+
+    .role-actor   { color: #60a5fa; }
+    .role-eval-ok { color: #34d399; }
+    .role-eval-no { color: #f87171; }
+    .role-refl    { color: #c084fc; }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100">
+
+<div class="flex h-screen">
+  <!-- ─────────────── Sidebar ─────────────── -->
+  <aside class="w-[380px] shrink-0 bg-slate-800 border-r border-slate-700 flex flex-col">
+    <div class="p-4 border-b border-slate-700">
+      <h2 class="text-lg font-bold mb-2">
+        Questions <span class="text-slate-400 text-sm" id="q-count">(…)</span>
+      </h2>
+      <input id="q-search" placeholder="Search…"
+             class="w-full mb-2 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm" />
+      <div class="flex gap-3 text-xs mb-1">
+        <label><input type="checkbox" class="f-diff" value="easy" checked> easy</label>
+        <label><input type="checkbox" class="f-diff" value="medium" checked> medium</label>
+        <label><input type="checkbox" class="f-diff" value="hard" checked> hard</label>
+      </div>
+      <label class="text-xs block">
+        <input type="checkbox" id="f-cherry"> ⭐ Only show ReAct ❌ → Reflexion ✅
+      </label>
+    </div>
+    <ul id="q-list" class="divide-y divide-slate-700 scroll-y flex-1"></ul>
+  </aside>
+
+  <!-- ─────────────── Main ─────────────── -->
+  <main class="flex-1 flex flex-col overflow-hidden">
+    <header class="p-4 bg-slate-800 border-b border-slate-700 flex items-center gap-4">
+      <div class="flex-1 min-w-0">
+        <h1 id="q-title" class="text-lg font-bold truncate">← Select a question</h1>
+        <p id="q-meta" class="text-xs text-slate-400 mt-1"></p>
+      </div>
+      <div class="flex items-center gap-2 shrink-0">
+        <label class="text-xs text-slate-400">Speed</label>
+        <input id="speed" type="range" min="0.5" max="5" step="0.5" value="2" class="w-24" />
+        <span id="speed-label" class="text-xs w-8 text-right">2×</span>
+        <button id="btn-replay"
+                class="bg-blue-600 hover:bg-blue-500 px-3 py-2 rounded text-sm font-semibold disabled:opacity-30"
+                disabled>▶ Replay</button>
+        <button id="btn-live"
+                class="bg-purple-600 hover:bg-purple-500 px-3 py-2 rounded text-sm font-semibold disabled:opacity-30"
+                disabled>⟲ Run Live</button>
+        <button id="btn-stop"
+                class="bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded text-sm disabled:opacity-30"
+                disabled>■</button>
+      </div>
+    </header>
+
+    <section class="flex-1 grid grid-cols-2 gap-4 p-4 overflow-hidden">
+      <div class="flex flex-col min-h-0">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="font-bold text-blue-400">ReAct</h3>
+          <span id="status-react" class="text-xs text-slate-500">idle</span>
+        </div>
+        <div id="trace-react" class="space-y-3 scroll-y flex-1 pr-1"></div>
+      </div>
+      <div class="flex flex-col min-h-0">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="font-bold text-green-400">Reflexion</h3>
+          <span id="status-reflexion" class="text-xs text-slate-500">idle</span>
+        </div>
+        <div id="trace-reflexion" class="space-y-3 scroll-y flex-1 pr-1"></div>
+      </div>
+    </section>
+
+    <footer class="bg-slate-800 border-t border-slate-700 px-4 py-2 text-xs flex gap-6">
+      <div class="flex gap-2 items-center">
+        <span class="text-slate-400">ReAct:</span>
+        <span id="sum-react" class="text-blue-400 font-semibold">–</span>
+      </div>
+      <div class="flex gap-2 items-center">
+        <span class="text-slate-400">Reflexion:</span>
+        <span id="sum-reflexion" class="text-green-400 font-semibold">–</span>
+      </div>
+      <div class="flex-1"></div>
+      <div id="mode-indicator" class="text-slate-500">—</div>
+    </footer>
+  </main>
+</div>
+
+<script>
+  // ─────────── State ───────────
+  const state = {
+    questions: [],
+    qid: null,
+    es: null,
+    mode: null,
+  };
+
+  // ─────────── DOM helpers ───────────
+  const $ = (sel) => document.querySelector(sel);
+  const $$ = (sel) => document.querySelectorAll(sel);
+  const escapeHtml = (s) => {
+    const d = document.createElement('div'); d.textContent = String(s ?? ''); return d.innerHTML;
+  };
+
+  // ─────────── Data load ───────────
+  async function loadQuestions() {
+    const r = await fetch('/api/questions');
+    state.questions = await r.json();
+    renderList();
+  }
+
+  function filteredQuestions() {
+    const search = $('#q-search').value.trim().toLowerCase();
+    const enabled = new Set(
+      Array.from($$('.f-diff')).filter(c => c.checked).map(c => c.value)
+    );
+    const cherry = $('#f-cherry').checked;
+    return state.questions.filter(q => {
+      if (!enabled.has(q.difficulty)) return false;
+      if (cherry && !q.interesting) return false;
+      if (search && !q.question.toLowerCase().includes(search)) return false;
+      return true;
+    });
+  }
+
+  function renderList() {
+    const ul = $('#q-list');
+    ul.innerHTML = '';
+    const list = filteredQuestions();
+    for (const q of list) {
+      const li = document.createElement('li');
+      li.className = 'p-3 hover:bg-slate-700 cursor-pointer text-sm ' +
+        (q.qid === state.qid ? 'bg-slate-700' : '');
+      const r = iconFor(q.react_correct);
+      const f = iconFor(q.reflexion_correct);
+      const star = q.interesting ? ' ⭐' : '';
+      const diffColor = { easy: 'text-emerald-400', medium: 'text-amber-400', hard: 'text-rose-400' }[q.difficulty] || 'text-slate-400';
+      li.innerHTML = `
+        <div class="flex justify-between items-center">
+          <span class="${diffColor} text-xs uppercase font-semibold">${q.difficulty}</span>
+          <span class="text-xs">${r} / ${f}${star}</span>
+        </div>
+        <div class="mt-1 line-clamp-2">${escapeHtml(q.question)}</div>
+      `;
+      li.onclick = () => selectQuestion(q.qid);
+      ul.appendChild(li);
+    }
+    $('#q-count').textContent = `(${list.length})`;
+  }
+
+  function iconFor(b) {
+    if (b === true) return '<span class="text-emerald-400">✅</span>';
+    if (b === false) return '<span class="text-rose-400">❌</span>';
+    return '<span class="text-slate-500">–</span>';
+  }
+
+  // ─────────── Question selection ───────────
+  async function selectQuestion(qid) {
+    state.qid = qid;
+    renderList();
+    const q = state.questions.find(x => x.qid === qid);
+    $('#q-title').textContent = q.question;
+    $('#q-meta').innerHTML =
+      `<span class="font-mono">${escapeHtml(q.qid)}</span> · `
+      + `difficulty: <span class="uppercase">${q.difficulty}</span> · `
+      + `gold: <span class="text-amber-300">${escapeHtml(q.gold)}</span>`;
+
+    stopStream();
+    clearTraces();
+    $('#btn-replay').disabled = false;
+    $('#btn-live').disabled = false;
+
+    // Render saved trace statically (no animation)
+    const r = await fetch(`/api/trace/${qid}`);
+    const data = await r.json();
+    for (const agent of ['react', 'reflexion']) {
+      const events = data[agent] || [];
+      for (const ev of events) renderEvent(ev, { animate: false });
+    }
+    setMode('saved');
+  }
+
+  // ─────────── Trace rendering ───────────
+  function clearTraces() {
+    $('#trace-react').innerHTML = '';
+    $('#trace-reflexion').innerHTML = '';
+    $('#sum-react').textContent = '–';
+    $('#sum-reflexion').textContent = '–';
+    $('#status-react').textContent = 'idle';
+    $('#status-reflexion').textContent = 'idle';
+  }
+
+  function renderEvent(ev, { animate = true } = {}) {
+    const agent = ev.agent;
+    if (!agent) return;
+    const root = $(`#trace-${agent}`);
+    if (!root) return;
+
+    // Remove pulse from all previous attempts of this agent
+    const clearPulse = () => root.querySelectorAll('.pulse-ring')
+      .forEach(el => el.classList.remove('pulse-ring'));
+
+    if (ev.type === 'attempt_start') {
+      clearPulse();
+      const card = document.createElement('div');
+      card.dataset.attempt = ev.attempt;
+      card.className = `bg-slate-800 border border-slate-700 rounded-lg p-3 pulse-ring ${animate ? 'fade-in' : ''}`;
+      card.innerHTML = `
+        <div class="flex items-center justify-between mb-2">
+          <span class="font-bold text-sm">Attempt ${ev.attempt}</span>
+          <span class="text-xs text-slate-500" data-slot="verdict"></span>
+        </div>
+        <div class="space-y-2 text-sm" data-slot="body"></div>
+      `;
+      root.appendChild(card);
+      root.scrollTop = root.scrollHeight;
+      $(`#status-${agent}`).textContent = `attempt ${ev.attempt}…`;
+      return;
+    }
+
+    const card = root.querySelector(`[data-attempt="${ev.attempt}"]`);
+    if (!card && ev.type !== 'run_end') return;
+    const body = card?.querySelector('[data-slot="body"]');
+
+    if (ev.type === 'actor_end') {
+      const div = document.createElement('div');
+      div.className = animate ? 'fade-in' : '';
+      div.innerHTML = `
+        <div class="flex items-center gap-2">
+          <span class="role-actor font-semibold">🎭 Actor</span>
+          <span class="text-xs text-slate-500">${ev.tokens || 0} tok · ${ev.latency_ms || 0}ms</span>
+        </div>
+        <div class="bg-slate-900/70 rounded px-2 py-1 mt-1 font-mono text-[13px]">
+          ${escapeHtml(ev.answer)}
+        </div>`;
+      body.appendChild(div);
+    } else if (ev.type === 'evaluator_end') {
+      const ok = ev.score === 1;
+      const div = document.createElement('div');
+      div.className = animate ? 'fade-in' : '';
+      div.innerHTML = `
+        <div class="flex items-center gap-2">
+          <span class="${ok ? 'role-eval-ok' : 'role-eval-no'} font-semibold">
+            ${ok ? '✅' : '❌'} Evaluator
+          </span>
+          <span class="text-xs text-slate-500">score=${ev.score}</span>
+        </div>
+        <div class="text-xs text-slate-400 italic mt-1">
+          ${escapeHtml(ev.reason || '')}
+        </div>`;
+      body.appendChild(div);
+      card.querySelector('[data-slot="verdict"]').innerHTML =
+        ok ? '<span class="text-emerald-400">✅ correct</span>'
+           : '<span class="text-rose-400">❌ wrong</span>';
+    } else if (ev.type === 'reflector_end') {
+      const div = document.createElement('div');
+      div.className = (animate ? 'fade-in ' : '') +
+        'bg-purple-950/50 border border-purple-800/60 rounded px-2 py-2 mt-1';
+      div.innerHTML = `
+        <div class="role-refl font-semibold">💭 Reflector</div>
+        <div class="text-xs mt-1"><b>Lesson:</b> ${escapeHtml(ev.lesson || '')}</div>
+        <div class="text-xs mt-0.5"><b>Next:</b> ${escapeHtml(ev.strategy || '')}</div>`;
+      body.appendChild(div);
+    } else if (ev.type === 'attempt_end') {
+      // Keep the pulse until next attempt_start or run_end
+    } else if (ev.type === 'run_end') {
+      clearPulse();
+      const sec = (ev.total_latency_ms / 1000).toFixed(1);
+      const summary = `EM=${ev.correct ? 1 : 0} · attempts=${ev.total_attempts} · `
+        + `${ev.total_tokens}tok · ${sec}s · <span class="text-slate-400">${escapeHtml(ev.failure_mode)}</span>`;
+      $(`#sum-${agent}`).innerHTML = summary;
+      $(`#status-${agent}`).textContent = ev.correct ? 'done ✅' : 'done ❌';
+    }
+  }
+
+  // ─────────── Stream control ───────────
+  function stopStream() {
+    if (state.es) { state.es.close(); state.es = null; }
+    $('#btn-stop').disabled = true;
+  }
+
+  function subscribeStream(runId, modeLabel) {
+    stopStream();
+    clearTraces();
+    setMode(modeLabel);
+    state.es = new EventSource(`/api/stream/${runId}`);
+    $('#btn-stop').disabled = false;
+
+    state.es.onmessage = (e) => {
+      const ev = JSON.parse(e.data);
+      if (ev.type === 'done') { stopStream(); return; }
+      renderEvent(ev, { animate: true });
+    };
+    state.es.onerror = () => { stopStream(); };
+  }
+
+  function setMode(label) {
+    state.mode = label;
+    const txt = ({
+      saved:   'showing saved trace',
+      replay:  '▶ replay streaming…',
+      live:    '⟲ running live (Ollama)…',
+    })[label] || '—';
+    $('#mode-indicator').textContent = txt;
+  }
+
+  // ─────────── Buttons ───────────
+  $('#btn-replay').onclick = async () => {
+    if (!state.qid) return;
+    const speed = parseFloat($('#speed').value);
+    const r = await fetch(`/api/replay/${state.qid}?speed=${speed}`, { method: 'POST' });
+    const { run_id } = await r.json();
+    subscribeStream(run_id, 'replay');
+  };
+  $('#btn-live').onclick = async () => {
+    if (!state.qid) return;
+    const r = await fetch(`/api/run/${state.qid}`, { method: 'POST' });
+    const { run_id } = await r.json();
+    subscribeStream(run_id, 'live');
+  };
+  $('#btn-stop').onclick = () => {
+    stopStream();
+    if (state.qid) selectQuestion(state.qid); // restore saved view
+  };
+
+  // ─────────── Filters ───────────
+  $$('.f-diff').forEach(el => el.addEventListener('change', renderList));
+  $('#f-cherry').addEventListener('change', renderList);
+  $('#q-search').addEventListener('input', renderList);
+  $('#speed').addEventListener('input', (e) => {
+    $('#speed-label').textContent = e.target.value + '×';
+  });
+
+  // ─────────── Go ───────────
+  loadQuestions();
+</script>
+</body>
+</html>
